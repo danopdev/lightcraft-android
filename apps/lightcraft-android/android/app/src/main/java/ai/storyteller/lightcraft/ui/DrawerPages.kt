@@ -1,6 +1,8 @@
 package ai.storyteller.lightcraft.ui
 
 import ai.storyteller.lightcraft.core.engineVersion
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,6 +37,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -192,14 +197,34 @@ private fun OptionRow(label: String, selected: Boolean = false, chevron: Boolean
 fun PreferencesPage(vm: AppViewModel, onBack: () -> Unit) {
     var gpu by remember { mutableStateOf<Boolean?>(null) }
     var sub by remember { mutableStateOf<String?>(null) }
+    val pickAiMaskModel = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
+        vm.importAiMaskModel(it)
+    }
     LaunchedEffect(Unit) { gpu = vm.gpuEnabled() }
     if (sub == "import") {
         ImportOptionsPage(vm) { sub = null }
         return
     }
+    if (sub == "aiMasks") {
+        AiMaskPreferencesPage(
+            vm,
+            onBack = { sub = null },
+            onChooseModel = {
+                if (!vm.importingAiMaskModel && !vm.removingAiMaskModel && !vm.changingAiMaskModel) {
+                    runCatching { pickAiMaskModel.launch(arrayOf("*/*")) }
+                        .onFailure { vm.tell("There's no app to pick model files with.") }
+                }
+            },
+        )
+        return
+    }
     DrawerPage("Preferences", onBack) {
         // the reference's rows that open pages come first
         PageGroup { PageRow("Photo import options", null) { sub = "import" } }
+        PageGroup {
+            val activeModel = vm.aiMaskModels.firstOrNull { it.id == vm.activeAiMaskModelId }
+            PageRow("AI Mask models", activeModel?.name ?: "Not installed") { sub = "aiMasks" }
+        }
         gpu?.let { on ->
             PageGroup {
                 PageHeading("Rendering")
@@ -209,6 +234,96 @@ fun PreferencesPage(vm: AppViewModel, onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AiMaskPreferencesPage(vm: AppViewModel, onBack: () -> Unit, onChooseModel: () -> Unit) {
+    var modelToRemove by remember { mutableStateOf<AiMaskModel?>(null) }
+    LaunchedEffect(Unit) { vm.refreshAiMaskModel() }
+    DrawerPage("AI Mask model", onBack) {
+        PageGroup {
+            PageRow("Install model files", "Choose files", onClick = onChooseModel)
+        }
+        Text(
+            "Object and Describe masks use SAM 3. You can keep multiple models installed; the newest install becomes active. Select a ZIP, or model.safetensors, vocab.json and merges.txt together. Model files are stored on this device.",
+            color = pageNote,
+            fontFamily = Inter,
+            fontSize = 13.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(horizontal = 26.3.dp, vertical = 10.dp).widthIn(max = 474.dp),
+        )
+        if (vm.importingAiMaskModel || vm.removingAiMaskModel || vm.changingAiMaskModel) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.size(20.dp), color = Lc.highlight, strokeWidth = 2.dp)
+                Text(
+                    when {
+                        vm.importingAiMaskModel -> "Installing model…"
+                        vm.removingAiMaskModel -> "Removing model…"
+                        else -> "Changing active model…"
+                    },
+                    color = pageNote,
+                    fontFamily = Inter,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+        }
+        if (vm.aiMaskModels.isNotEmpty()) {
+            PageGroup {
+                PageHeading("INSTALLED MODELS")
+                vm.aiMaskModels.forEach { model ->
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(
+                            enabled = !vm.importingAiMaskModel && !vm.removingAiMaskModel && !vm.changingAiMaskModel,
+                            role = Role.RadioButton,
+                        ) { vm.selectAiMaskModel(model.id) }.padding(start = 13.7.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            model.name,
+                            color = if (vm.activeAiMaskModelId == model.id) Lc.choice else pageText,
+                            fontFamily = Inter,
+                            fontSize = 15.sp,
+                            modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+                        )
+                        if (vm.activeAiMaskModelId == model.id) {
+                            Text("Active", color = pageNote, fontFamily = Inter, fontSize = 12.sp)
+                        }
+                        TextButton(
+                            onClick = { modelToRemove = model },
+                            enabled = !vm.importingAiMaskModel && !vm.removingAiMaskModel && !vm.changingAiMaskModel,
+                        ) {
+                            Text("Remove")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    modelToRemove?.let { model ->
+        AlertDialog(
+            onDismissRequest = { modelToRemove = null },
+            title = { Text("Remove ${model.name}?") },
+            text = { Text("This AI Mask model's files will be deleted from this device.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        modelToRemove = null
+                        vm.removeAiMaskModel(model.id)
+                    },
+                    enabled = !vm.importingAiMaskModel && !vm.removingAiMaskModel && !vm.changingAiMaskModel,
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { modelToRemove = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 

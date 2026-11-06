@@ -38,7 +38,11 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -146,8 +150,10 @@ enum class MaskSection(val label: String, val icon: Glyph, val keys: List<String
     OPTICS("Optics", LcIcon.SectionOptics, listOf("moire", "defringe")),
 }
 
-/** The kinds of mask the phone makes (the AI ones need a model the phone doesn't have). */
+/** The kinds of mask the phone makes (Object and Describe use the optional AI Mask model). */
 val maskKinds = listOf(
+    Triple("object", "Object", LcIcon.Effects),
+    Triple("prompt", "Describe", LcIcon.Effects),
     Triple("brush", "Brush", LcIcon.Pencil),
     Triple("linear", "Linear Gradient", LcIcon.Segments),
     Triple("radial", "Radial Gradient", LcIcon.Radial),
@@ -164,6 +170,8 @@ fun maskIcon(kind: String): LcIcon = maskKinds.firstOrNull { it.first == kind }?
 @Composable
 fun MaskKindIcon(kind: String, modifier: Modifier, mono: Boolean = false) {
     when (kind) {
+        "object" -> MdIcon(MdIcon.AutoAwesome, null, tint = Color(0xFFD0D0D0), size = 22.dp, modifier = modifier)
+        "prompt" -> MdIcon(MdIcon.Search, null, tint = Color(0xFFD0D0D0), size = 22.dp, modifier = modifier)
         "linear" -> Canvas(modifier) {
             val s = size.minDimension * 0.78f
             val tl = Offset((size.width - s) / 2, (size.height - s) / 2)
@@ -324,6 +332,16 @@ fun MaskColumn(vm: AppViewModel, ed: EditorState, modifier: Modifier) {
             }
             // 15.6 dp under the + or a mask's picture, 7.8 under the edited mask's card (the reference's)
             if (ed.masks.firstOrNull()?.id != ed.selectedMask) Spacer(Modifier.height(7.8.dp))
+            if (ed.aiMaskBusy) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    Text("AI Mask is analyzing…", color = Lc.panelTextSoft, fontFamily = Inter, fontSize = 11.sp)
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        color = Lc.highlight,
+                        trackColor = Lc.divider,
+                    )
+                }
+            }
         }
     }
 }
@@ -924,11 +942,13 @@ private fun MaskThumb(m: MaskInfo, photoW: Float, photoH: Float, frame: Color?, 
 
 /**
  * The new mask sheet, as the reference's: "Create new mask" over 47.7 dp rows every 55.5 dp in
- * groups 17.5 dp apart (its first group, Select Subject, Sky and Background, is AI and left out).
+ * groups 17.5 dp apart, including the phone's Object and Describe masks.
  */
 @Composable
 fun NewMaskSheet(vm: AppViewModel, op: String?, onDismiss: () -> Unit) {
     val uri = LocalUriHandler.current
+    var describing by remember { mutableStateOf(false) }
+    var prompt by remember { mutableStateOf("") }
     val title = when (op) {
         "add" -> "Add to the mask"
         "subtract" -> "Subtract from the mask"
@@ -941,8 +961,15 @@ fun NewMaskSheet(vm: AppViewModel, op: String?, onDismiss: () -> Unit) {
             BarButton(MdIcon.HelpOutline, "Help", size = 48.dp, iconSize = 24.dp, tint = Lc.panelText) { runCatching { uri.openUri(HELP_URL) } }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Lc.sectionChosen))
+        Text(
+            if (vm.aiMaskModelInstalled) "AI Mask model installed · SAM 3" else "Object and Describe require the AI Mask model. Install it in Preferences.",
+            color = Lc.panelTextSoft,
+            fontFamily = Inter,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        )
         Spacer(Modifier.height(16.dp))
-        listOf(maskKinds.take(3), maskKinds.drop(3)).forEachIndexed { g, group ->
+        listOf(maskKinds.take(2), maskKinds.drop(2).take(3), maskKinds.drop(5)).forEachIndexed { g, group ->
             if (g > 0) {
                 Spacer(Modifier.height(7.dp))
                 Box(Modifier.align(Alignment.CenterHorizontally).width(320.dp).height(2.dp).background(Lc.panelButtonBorder))
@@ -957,7 +984,15 @@ fun NewMaskSheet(vm: AppViewModel, op: String?, onDismiss: () -> Unit) {
                         .height(47.7.dp)
                         .clip(RoundedCornerShape(7.dp))
                         .background(Lc.panelButton)
-                        .clickable(role = Role.Button) { if (op == null) vm.addMask(kind) else vm.addMaskPart(op, kind) }
+                        .clickable(role = Role.Button) {
+                            when {
+                                kind in setOf("object", "prompt") && !vm.aiMaskModelInstalled ->
+                                    vm.tell("Install the AI Mask model from Preferences to use Object and Describe.")
+                                kind == "prompt" -> describing = true
+                                op == null -> vm.addMask(kind)
+                                else -> vm.addMaskPart(op, kind)
+                            }
+                        }
                         .padding(start = 12.dp, end = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -968,6 +1003,35 @@ fun NewMaskSheet(vm: AppViewModel, op: String?, onDismiss: () -> Unit) {
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+    if (describing) {
+        AlertDialog(
+            onDismissRequest = { describing = false },
+            title = { Text("Describe what to select") },
+            text = {
+                Column {
+                    Text("For example, “the red car” or “the person”.")
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = prompt,
+                        onValueChange = { prompt = it },
+                        singleLine = true,
+                        label = { Text("Description") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = prompt.isNotBlank(),
+                    onClick = {
+                        describing = false
+                        onDismiss()
+                        if (op == null) vm.addMask("prompt", prompt) else vm.addMaskPart(op, "prompt", prompt)
+                    },
+                ) { Text("Select") }
+            },
+            dismissButton = { TextButton(onClick = { describing = false }) { Text("Cancel") } },
+        )
     }
 }
 

@@ -24,6 +24,8 @@ class Engine private constructor(
     val session: MobileSession,
     /** Where picked files are copied before the import moves them into the library (same volume). */
     val stagingDir: File,
+    /** The app-private root folder holding installed AI mask models. */
+    val aiMaskModelDir: File,
     /** The library's folder (null: the in-memory demo). */
     val libraryDir: File?,
     /** Why the library on disk could not be used, when the session is the in-memory demo instead. */
@@ -73,13 +75,15 @@ class Engine private constructor(
                 problem = e.message
                 MobileSession.demo()
             }
+            val aiMaskModelDir = File(context.filesDir, "models/ai-mask")
+            session.configureAiMasks(aiMaskModelDir.absolutePath)
             // The engine budgets a quarter of RAM for its caches (at most 1.5 GB); less on phones
             // the system calls low-RAM.
             val am = context.getSystemService(ActivityManager::class.java)
             if (am?.isLowRamDevice == true) session.setMemoryBudget(256u)
             val ram = am?.let { ActivityManager.MemoryInfo().also(it::getMemoryInfo).totalMem } ?: 0L
             val zoomEdge = if (ram >= 7L shl 30) Int.MAX_VALUE else 2560
-            return Engine(session, staging, library.takeIf { problem == null }, problem, zoomEdge)
+            return Engine(session, staging, aiMaskModelDir, library.takeIf { problem == null }, problem, zoomEdge)
         }
     }
 }

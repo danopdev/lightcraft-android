@@ -167,6 +167,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 fun EditorScreen(vm: AppViewModel, ed: EditorState, snackbar: SnackbarHostState) {
     var namingPreset by remember { mutableStateOf(false) }
     val createPreset = { namingPreset = true }
+    LaunchedEffect(ed.photoId, vm.aiMaskModelInstalled) {
+        if (vm.aiMaskModelInstalled) {
+            while (true) {
+                vm.pollAiMasks()
+                delay(200)
+            }
+        }
+    }
     // the export sheet, for sharing (true) or saving (false); Share first opens its sheet of ways, as the reference's
     var exportFor by remember { mutableStateOf<Boolean?>(null) }
     var sharing by remember { mutableStateOf(false) }
@@ -1324,6 +1332,19 @@ private fun PhotoView(vm: AppViewModel, ed: EditorState, modifier: Modifier, sid
                     val c = at - Offset(size.width / 2f, size.height / 2f)
                     return clamp(c * (1f - k) + o * k, to)
                 }
+                fun objectSelectionActive(): Boolean {
+                    if (ed.tool != MainTool.MASKING) return false
+                    val mask = ed.masks.firstOrNull { it.id == ed.selectedMask } ?: return false
+                    val component = mask.components.indexOfLast { it.kind == "object" }
+                    return component >= 0 && (ed.maskPart < 0 || ed.maskPart == component)
+                }
+                fun objectPoint(at: Offset): Pair<Double, Double>? {
+                    val image = ed.image ?: return null
+                    val geometry = ed.geometry ?: return null
+                    val viewPoint = photoPoint(at, size, image.width, image.height, zoomAnim.value, panAnim.value) ?: return null
+                    val point = Affine.of(geometry.toPhoto)?.apply(viewPoint.x.toDouble(), viewPoint.y.toDouble()) ?: return null
+                    return if (point.first in 0.0..1.0 && point.second in 0.0..1.0) point else null
+                }
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     // a press a button over the photo took (Masking's +, say) isn't a tap or a hold on the photo
@@ -1351,6 +1372,13 @@ private fun PhotoView(vm: AppViewModel, ed: EditorState, modifier: Modifier, sid
                     }
                     if (onButton && lifted != false) return@awaitEachGesture
                     if (lifted == null) {
+                        if (objectSelectionActive()) {
+                            do {
+                                val ev = awaitPointerEvent()
+                            } while (ev.changes.any { it.pressed })
+                            objectPoint(down.position)?.let { (x, y) -> vm.addObjectPoint(x, y, exclude = true) }
+                            return@awaitEachGesture
+                        }
                         vm.showBefore(true)
                         do {
                             val ev = awaitPointerEvent()
@@ -1362,6 +1390,10 @@ private fun PhotoView(vm: AppViewModel, ed: EditorState, modifier: Modifier, sid
                         val image = ed.image
                         if (ed.pickingWb) {
                             if (image != null) photoPoint(down.position, size, image.width, image.height, zoomAnim.value, panAnim.value)?.let { vm.pickWhiteBalance(it.x, it.y) }
+                            return@awaitEachGesture
+                        }
+                        if (objectSelectionActive()) {
+                            objectPoint(down.position)?.let { (x, y) -> vm.addObjectPoint(x, y, exclude = false) }
                             return@awaitEachGesture
                         }
                         // a tap with no second soon after: the photo alone on the screen, or everything back

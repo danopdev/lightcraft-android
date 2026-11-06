@@ -8,9 +8,9 @@ server and the web build, and like them it drives the engine through commands
 Status: alpha, like the rest of LightCraft. You can browse the library (views, albums, filters,
 sorting, search, a justified or square grid), import photos (JPEG, PNG, TIFF, WebP, DNG and the
 other raw formats LightCraft reads; not HEIC, which the engine can't decode yet), edit them with
-every develop slider, crop and straighten, paint masks, remove spots, apply presets and profiles
-(previewed on the photo), rate and flag them (one at a time or a selection), undo and redo, compare
-against the original, and save or share JPEGs.
+every develop slider, crop and straighten, paint masks and select objects by click or text with
+AI masks, remove spots, apply presets and profiles (previewed on the photo), rate and flag them (one
+at a time or a selection), undo and redo, compare against the original, and save or share JPEGs.
 
 The screens follow the reference phone app's layout and behaviour.
 Where the reference uses Google's Material icons, so does LightCraft (the same Apache-2.0 set,
@@ -80,6 +80,12 @@ rebuilds only what changed. Gradle finds `cargo` in `~/.cargo/bin` (or `$CARGO`)
   camera app write a photo into the app's cache (`res/xml/file_paths.xml`, a `FileProvider`),
   which is then moved in the same way. Raw files that the photo picker doesn't list come in from
   Files: the folder at the end of more › Add photos.
+- **AI masks** currently support only SAM 3, which runs locally on the CPU. In Masking, choose Object or Describe and import the
+  official checkpoint as a ZIP or select `model.safetensors`, `vocab.json` and `merges.txt`
+  together. The archive must contain those files either at its root or in one enclosing folder.
+  LightCraft verifies the checkpoint's size and SHA-256, installs only those files into the app's private
+  `files/models/ai-mask/` folder, and never bundles or uploads the weights. The model is about 3.4 GB
+  and inference can use several GB of memory; SAM 3 is under Meta's [SAM License](../../docs/ai-masks.md).
 - **Export** renders and encodes in the engine (`export`, the `app.export` options) and the app
   writes the bytes into `Pictures/LightCraft` through MediaStore (no storage permission needed).
   A share goes from the app's cache through its `FileProvider` instead (`PhotoFiles.shareable`), so

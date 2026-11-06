@@ -35,7 +35,7 @@ object PhotoFiles {
     }
 
     /** The document's name, with an extension (the engine tells formats apart by both). */
-    private fun fileName(context: Context, uri: Uri): String {
+    internal fun fileName(context: Context, uri: Uri): String {
         val shown = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null
         }

@@ -28,6 +28,7 @@ import ai.storyteller.lightcraft.engine.DeviceMedia
 import ai.storyteller.lightcraft.engine.DevicePhoto
 import ai.storyteller.lightcraft.engine.Engine
 import ai.storyteller.lightcraft.engine.PhotoFiles
+import ai.storyteller.lightcraft.engine.AiMaskModelArchive
 import ai.storyteller.lightcraft.engine.toImageBitmap
 import android.app.Application
 import android.net.Uri
@@ -48,9 +49,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
+import java.io.IOException
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,6 +63,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+
+data class AiMaskModel(val id: String, val name: String)
+
+private data class InstalledAiMaskModel(val model: AiMaskModel, val directory: File)
 
 /** A snackbar message, with an optional action. */
 class UiMessage(val text: String, val actionLabel: String? = null, val action: (() -> Unit)? = null)
@@ -179,6 +187,7 @@ class EditorState(val photoId: ULong, info: PhotoInfo, val device: DeviceOrigin?
     /** Masking: the masks, the one being edited, what its panel shows (`new`, `mask`, or a section: `light`…), the brush. */
     var masks by mutableStateOf<List<MaskInfo>>(emptyList())
     var selectedMask by mutableStateOf<UInt?>(null)
+    var aiMaskBusy by mutableStateOf(false)
 
     /** The part of the edited mask its handles and tools edit (an index of its parts; −1: the mask itself). */
     var maskPart by mutableIntStateOf(0)
@@ -325,6 +334,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var photos by mutableStateOf<List<PhotoInfo>>(emptyList())
         private set
     var importing by mutableStateOf(false)
+        private set
+    var aiMaskModelInstalled by mutableStateOf(false)
+        private set
+    var aiMaskModels by mutableStateOf<List<AiMaskModel>>(emptyList())
+        private set
+    var activeAiMaskModelId by mutableStateOf<String?>(null)
+        private set
+    var importingAiMaskModel by mutableStateOf(false)
+        private set
+    var removingAiMaskModel by mutableStateOf(false)
+        private set
+    var changingAiMaskModel by mutableStateOf(false)
         private set
     var editor by mutableStateOf<EditorState?>(null)
         private set
@@ -586,6 +607,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             lightcraft.engine.await()
                 .onSuccess { e ->
                     engine = e
+                    refreshAiMaskModel()
                     e.problem?.let { say("The library couldn't be opened, so this is the demo (nothing is saved): $it") }
                     // the order the library was left in (the engine keeps it with the library)
                     runCatching { JSONObject(e.command { execute("library.state", "") }).optJSONObject("sort") }.getOrNull()?.let {
@@ -721,6 +743,177 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }.onFailure { say("Import failed: ${it.message}") }
         }
+    }
+
+    /** Import the AI mask model ZIP or its three files into a separate app-private model folder. */
+    fun importAiMaskModel(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val e = engine ?: return
+        if (importingAiMaskModel || removingAiMaskModel || changingAiMaskModel) return
+        if (editor?.aiMaskBusy == true) {
+            say("Wait for AI Mask analysis to finish before changing its model.")
+            return
+        }
+        importingAiMaskModel = true
+        say("Importing the AI Mask model (about 3.4 GB uncompressed)…")
+        viewModelScope.launch {
+            try {
+                val modelId = "model-${System.currentTimeMillis()}-${UUID.randomUUID()}"
+                val modelDirectory = File(e.aiMaskModelDir, modelId)
+                withContext(Dispatchers.IO) {
+                    val app = getApplication<Application>()
+                    val selected = uris.map { uri ->
+                        val name = PhotoFiles.fileName(app, uri)
+                        val mime = app.contentResolver.getType(uri)
+                        Triple(name, mime, uri)
+                    }
+                    val archives = selected.filter { (name, mime) ->
+                        name.endsWith(".zip", ignoreCase = true) ||
+                            mime.equals("application/zip", ignoreCase = true) ||
+                            mime.equals("application/x-zip-compressed", ignoreCase = true)
+                    }
+                    if (archives.isNotEmpty()) {
+                        if (selected.size != 1) throw IOException("Select one ZIP archive or the three model files, not both")
+                        val input = app.contentResolver.openInputStream(archives.single().third)
+                            ?: throw IOException("The selected ZIP couldn't be opened")
+                        input.use { AiMaskModelArchive.install(it, modelDirectory) }
+                    } else {
+                        val duplicates = selected.groupBy { it.first }.filterValues { it.size > 1 }.keys
+                        if (duplicates.isNotEmpty()) throw IOException("More than one selected file is named ${duplicates.sorted().joinToString()}")
+                        val files = selected.associate { (name, _, uri) ->
+                            name to {
+                                app.contentResolver.openInputStream(uri)
+                                    ?: throw IOException("Couldn't open $name")
+                            }
+                        }
+                        AiMaskModelArchive.installFiles(files, modelDirectory)
+                    }
+                }
+                syncAiMaskModels(e, preferredId = modelId)
+                say("AI Mask model imported and selected. Masking can use several GB of memory and may run slowly on phones.")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                say("AI Mask model import failed: ${failure.message}")
+            } finally {
+                importingAiMaskModel = false
+            }
+        }
+    }
+
+    private fun installedAiMaskModels(root: File): List<InstalledAiMaskModel> {
+        fun hasModelFiles(directory: File) =
+            listOf("model.safetensors", "vocab.json", "merges.txt").all { File(directory, it).isFile }
+
+        val entries = mutableListOf<InstalledAiMaskModel>()
+        root.listFiles()
+            ?.asSequence()
+            ?.filter { it.isDirectory && it.name.startsWith("model-") && hasModelFiles(it) }
+            ?.sortedBy { it.name }
+            ?.forEach { directory ->
+                entries += InstalledAiMaskModel(AiMaskModel(directory.name, ""), directory)
+            }
+        return entries.mapIndexed { index, entry ->
+            entry.copy(model = entry.model.copy(name = "SAM 3${if (index == 0) "" else " (${index + 1})"}"))
+        }
+    }
+
+    private suspend fun syncAiMaskModels(e: Engine, preferredId: String? = prefs.getString("aiMaskActiveModelId", null)) {
+        val installed = withContext(Dispatchers.IO) { installedAiMaskModels(e.aiMaskModelDir) }
+        val active = installed.firstOrNull { it.model.id == preferredId } ?: installed.firstOrNull()
+        val isInstalled = e.command {
+            configureAiMasks((active?.directory ?: e.aiMaskModelDir).absolutePath)
+            aiMaskModelInstalled()
+        }
+        aiMaskModelInstalled = isInstalled
+        aiMaskModels = installed.map { it.model }
+        activeAiMaskModelId = active?.model?.id
+        if (active == null) {
+            prefs.edit().remove("aiMaskActiveModelId").apply()
+        } else {
+            prefs.edit().putString("aiMaskActiveModelId", active.model.id).apply()
+        }
+    }
+
+    fun refreshAiMaskModel() {
+        val e = engine ?: return
+        viewModelScope.launch {
+            runCatching { syncAiMaskModels(e) }
+                .onFailure { say("Couldn't check the AI Mask models: ${it.message}") }
+        }
+    }
+
+    fun selectAiMaskModel(id: String) {
+        val e = engine ?: return
+        if (importingAiMaskModel || removingAiMaskModel || changingAiMaskModel) return
+        if (editor?.aiMaskBusy == true) {
+            say("Wait for AI Mask analysis to finish before changing its model.")
+            return
+        }
+        if (aiMaskModels.none { it.id == id } || activeAiMaskModelId == id) return
+        changingAiMaskModel = true
+        viewModelScope.launch {
+            try {
+                syncAiMaskModels(e, preferredId = id)
+                say("Selected ${aiMaskModels.firstOrNull { it.id == id }?.name ?: "AI Mask model"}")
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                say("Couldn't select the AI Mask model: ${error.message}")
+            } finally {
+                changingAiMaskModel = false
+            }
+        }
+    }
+
+    fun removeAiMaskModel(id: String) {
+        val e = engine ?: return
+        if (importingAiMaskModel || removingAiMaskModel || changingAiMaskModel) return
+        if (editor?.aiMaskBusy == true) {
+            say("Wait for AI Mask analysis to finish before changing its model.")
+            return
+        }
+        val model = installedAiMaskModels(e.aiMaskModelDir).firstOrNull { it.model.id == id } ?: run {
+            say("That AI Mask model is no longer installed.")
+            refreshAiMaskModel()
+            return
+        }
+        removingAiMaskModel = true
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (model.directory.exists() && !model.directory.deleteRecursively()) {
+                        throw IOException("Couldn't remove the AI Mask model files.")
+                    }
+                }
+                val remaining = withContext(Dispatchers.IO) { installedAiMaskModels(e.aiMaskModelDir) }
+                val nextActive = if (activeAiMaskModelId == id) remaining.firstOrNull()?.model?.id else activeAiMaskModelId
+                syncAiMaskModels(e, preferredId = nextActive)
+                say("Removed ${model.model.name}.")
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                say("Couldn't remove the AI Mask model: ${error.message}")
+            } finally {
+                removingAiMaskModel = false
+            }
+        }
+    }
+
+    /** Apply completed AI mask work and update the open editor. */
+    suspend fun pollAiMasks() {
+        val e = engine ?: return
+        runCatching { e.command { this.pollAiMasks() } }
+            .onSuccess { poll ->
+                editor?.aiMaskBusy = poll.busy
+                poll.messages.forEach { say(it) }
+                if (poll.changed) {
+                    refreshMasks(lastPart = true)
+                    requestView()
+                }
+            }
+            .onFailure {
+                if (it is CancellationException) throw it
+                say("AI mask failed: ${it.message}")
+            }
     }
 
     /** Import Presets: preset files (and zips and folders of them) staged and read in, in their own groups. */
@@ -2232,29 +2425,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** A new mask of [kind] (brush, linear, radial, placed in the middle of the view; a colour or luminance range, picked next). */
-    fun addMask(kind: String) {
+    fun addMask(kind: String, text: String? = null) {
         val ed = editor ?: return
         if (kind == "colorRange" || kind == "luminanceRange") return startRangeMask(kind, null)
         val params = shapeParams(ed, kind)
+        if (kind == "prompt") params.put("text", text.orEmpty().trim())
         ed.maskPicker = null
         ed.maskPart = 0
         edit(after = {
             refreshMasks()
             showNewMask(ed)
+            if (kind == "object") say("Tap the object to include it; press and hold to exclude.")
         }) { it.execute("mask.add", params.toString()) }
     }
 
     /** A part of [kind] added to the edited mask ([op] `add`) or taken from it (`subtract`); then it's the part edited. */
-    fun addMaskPart(op: String, kind: String) {
+    fun addMaskPart(op: String, kind: String, text: String? = null) {
         val ed = editor ?: return
         val mask = ed.selectedMask ?: return
         if (kind == "colorRange" || kind == "luminanceRange") return startRangeMask(kind, op)
         val params = shapeParams(ed, kind).put("id", mask.toLong()).put("op", op)
+        if (kind == "prompt") params.put("text", text.orEmpty().trim())
         ed.maskPicker = null
         edit(after = {
             refreshMasks(lastPart = true)
             showNewMask(ed)
+            if (kind == "object") say("Tap the object to include it; press and hold to exclude.")
         }) { it.execute("mask.addComponent", params.toString()) }
+    }
+
+    /** Add an include or exclude click to the selected Object mask. */
+    fun addObjectPoint(x: Double, y: Double, exclude: Boolean) {
+        val ed = editor ?: return
+        if (!aiMaskModelInstalled) {
+            say("Import the AI Mask model before creating an AI mask.")
+            return
+        }
+        val params = JSONObject().put("x", x).put("y", y).put("exclude", exclude)
+        edit(after = { refreshMasks(lastPart = true) }) { it.execute("mask.objectPoint", params.toString()) }
     }
 
     /**
