@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lightcraft_engine::catalog::{Flag, MediaKind, Photo, PhotoId};
@@ -321,6 +322,14 @@ pub struct ImageHistogram {
     pub luma: Vec<u32>,
 }
 
+/// What the AI Mask worker has finished since the last poll.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AiMaskPoll {
+    pub changed: bool,
+    pub messages: Vec<String>,
+    pub busy: bool,
+}
+
 /// A rendered photo, ready to show.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RenderedImage {
@@ -526,6 +535,30 @@ impl MobileSession {
             serde_json::from_str(&params_json).map_err(|e| MobileError::Command(format!("`{command}`: parameters are not valid JSON: {e}")))?
         };
         Ok(self.run(&command, params)?.to_string())
+    }
+
+    /// Configure AI Mask for this app's private model folder and queue inference off the UI thread.
+    pub fn configure_ai_masks(&self, model_dir: String) -> Result<(), MobileError> {
+        let dir = PathBuf::from(&model_dir);
+        if !dir.is_absolute() {
+            return Err(MobileError::Command(format!("the AI Mask model folder must be an absolute path, not `{model_dir}`")));
+        }
+        let mut session = self.lock();
+        session.segmenter.dir = Some(dir);
+        session.segmenter.background = true;
+        Ok(())
+    }
+
+    /// Whether all files required by the AI Mask model are present.
+    pub fn ai_mask_model_installed(&self) -> bool {
+        self.lock().segmenter.installed()
+    }
+
+    /// Apply completed AI Mask work and collect its messages. Call periodically while the editor is open.
+    pub fn poll_ai_masks(&self) -> AiMaskPoll {
+        let mut session = self.lock();
+        let polled = session.segment_poll();
+        AiMaskPoll { changed: polled.changed, messages: polled.messages, busy: session.segmenter.busy() }
     }
 
     /// Every command, with whether it is available right now.

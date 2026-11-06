@@ -13,6 +13,18 @@ fn first_photo(s: &MobileSession) -> u64 {
     photos[0].id
 }
 
+#[test]
+fn ai_mask_session_requires_absolute_model_paths_and_polls_background_work() {
+    let s = MobileSession::demo();
+    assert!(s.configure_ai_masks("models/ai-mask".into()).is_err());
+    let dir = std::env::temp_dir().join(format!("lc-mobile-ai-mask-{}", std::process::id()));
+    s.configure_ai_masks(dir.to_string_lossy().into_owned()).unwrap();
+    assert!(!s.ai_mask_model_installed());
+    let poll = s.poll_ai_masks();
+    assert!(!poll.changed && !poll.busy);
+    assert!(poll.messages.is_empty());
+}
+
 fn control(s: &MobileSession, id: &str) -> DevelopControl {
     s.develop_controls().into_iter().find(|c| c.id == id).unwrap()
 }
