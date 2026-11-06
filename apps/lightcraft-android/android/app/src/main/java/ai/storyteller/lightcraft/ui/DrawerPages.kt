@@ -1,6 +1,8 @@
 package ai.storyteller.lightcraft.ui
 
 import ai.storyteller.lightcraft.core.engineVersion
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,6 +30,9 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -192,14 +197,25 @@ private fun OptionRow(label: String, selected: Boolean = false, chevron: Boolean
 fun PreferencesPage(vm: AppViewModel, onBack: () -> Unit) {
     var gpu by remember { mutableStateOf<Boolean?>(null) }
     var sub by remember { mutableStateOf<String?>(null) }
+    val pickDenoiseModel = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
+        vm.inspectDenoiseModel(it)
+    }
     LaunchedEffect(Unit) { gpu = vm.gpuEnabled() }
     if (sub == "import") {
         ImportOptionsPage(vm) { sub = null }
         return
     }
+    if (sub == "denoise") {
+        DenoisePreferencesPage(vm, onBack = { sub = null }) {
+            runCatching { pickDenoiseModel.launch(arrayOf("*/*")) }
+                .onFailure { vm.tell("There's no app to pick model files with.") }
+        }
+        return
+    }
     DrawerPage("Preferences", onBack) {
         // the reference's rows that open pages come first
         PageGroup { PageRow("Photo import options", null) { sub = "import" } }
+        PageGroup { PageRow("AI Denoise", null) { sub = "denoise" } }
         gpu?.let { on ->
             PageGroup {
                 PageHeading("Rendering")
@@ -209,6 +225,91 @@ fun PreferencesPage(vm: AppViewModel, onBack: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DenoisePreferencesPage(vm: AppViewModel, onBack: () -> Unit, onChooseModel: () -> Unit) {
+    val settings = vm.denoiseModels
+    val modelId = settings?.optString("model")?.takeIf { it.isNotBlank() && it != "null" }.orEmpty()
+    val models = settings?.optJSONArray("models")
+    val modelDirectory = settings?.optString("dir")?.takeIf { it.isNotBlank() && it != "null" } ?: vm.engine?.denoiseModelsDir?.absolutePath
+    val modelName = modelId.takeIf { it.isNotBlank() }?.let { id ->
+        (0 until (models?.length() ?: 0)).firstNotNullOfOrNull { index ->
+            models?.optJSONObject(index)?.takeIf { it.optString("id") == id }?.optString("name")
+        }
+    }
+    LaunchedEffect(Unit) { vm.refreshDenoiseModels() }
+    DrawerPage("AI Denoise", onBack) {
+        PageGroup {
+            PageRow("Install from files", modelName ?: "Choose model") { onChooseModel() }
+        }
+        Text(
+            "Download the model files yourself, then select a ZIP containing the .onnx file and denoise-model.json, or select those two files together. LightCraft checks the model, shows its licence, and copies it into private app storage. Model weights are not included.",
+            color = pageNote,
+            fontFamily = Inter,
+            fontSize = 13.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(horizontal = 26.3.dp, vertical = 10.dp).widthIn(max = 474.dp),
+        )
+        if (vm.denoiseModelImporting) {
+            CircularProgressIndicator(Modifier.padding(16.dp), color = Lc.highlight)
+        }
+        vm.denoiseModelError?.let {
+            Text(it, color = Color(0xFFFF8A80), fontFamily = Inter, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 26.dp, vertical = 8.dp))
+        }
+        if (modelId.isNotBlank()) {
+            PageGroup {
+                PageHeading("INSTALLED MODEL")
+                Text(modelName ?: modelId, color = pageText, fontFamily = Inter, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 13.7.dp, vertical = 8.dp))
+                modelDirectory?.let {
+                    Text("$it/$modelId", color = pageNote, fontFamily = Inter, fontSize = 12.sp, lineHeight = 15.sp, modifier = Modifier.padding(horizontal = 13.7.dp, vertical = 8.dp))
+                }
+            }
+        }
+        modelDirectory?.let { directory ->
+            PageGroup {
+                PageHeading("MODEL STORAGE")
+                Text(directory, color = pageNote, fontFamily = Inter, fontSize = 12.sp, lineHeight = 15.sp, modifier = Modifier.padding(horizontal = 13.7.dp, vertical = 8.dp))
+            }
+        }
+        if (settings?.optBoolean("runtime") == false) {
+            Text("This build cannot run AI Denoise models.", color = Color(0xFFFF8A80), fontFamily = Inter, fontSize = 13.sp, modifier = Modifier.padding(16.dp))
+        }
+    }
+
+    vm.pendingDenoiseModel?.let { model ->
+        val licence = model.optJSONObject("licence")
+        val commercial = when (licence?.optString("commercial")) {
+            "yes" -> "allowed"
+            "no" -> "not allowed"
+            else -> "unclear"
+        }
+        val terms = buildString {
+            append("Licence: ${licence?.optString("name").orEmpty().ifBlank { "Not specified" }}")
+            append("\nCommercial use: $commercial")
+            licence?.optString("url")?.takeIf { it.isNotBlank() }?.let { append("\nTerms: $it") }
+            licence?.optString("notice")?.takeIf { it.isNotBlank() }?.let { append("\n\n$it") }
+        }
+        AlertDialog(
+            onDismissRequest = { vm.dismissPendingDenoiseModel() },
+            title = { Text("Install ${model.optString("name", "AI Denoise model")}") },
+            text = {
+                Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                    Text("Review the model's terms before installing. The model file is only used on this device.")
+                    Spacer(Modifier.height(12.dp))
+                    Text(terms)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = vm::acceptDenoiseModel, enabled = !vm.denoiseModelImporting) {
+                    Text(if (vm.denoiseModelImporting) "Installing..." else "Accept & Install")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = vm::dismissPendingDenoiseModel, enabled = !vm.denoiseModelImporting) { Text("Cancel") }
+            },
+        )
     }
 }
 

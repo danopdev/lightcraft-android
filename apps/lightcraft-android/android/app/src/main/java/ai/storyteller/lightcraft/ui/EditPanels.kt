@@ -908,11 +908,36 @@ private fun DetailPanel(vm: AppViewModel, ed: EditorState) {
         return listOf(SliderRow(amount, "Amount")) + details.map { SliderRow(it, shown = set) }
     }
     val rows = when (ed.detailTab) {
-        "noise" -> tab("detail.nrLuminance", listOf("detail.nrDetail", "detail.nrContrast"))
+        "noise" -> listOf(
+            SliderRow("enhance.denoise", "Amount", shown = { it.state?.denoiseEnabled == true }),
+            SliderRow("detail.nrLuminance", "Noise Reduction"),
+            SliderRow("detail.nrDetail", shown = { it.value("detail.nrLuminance") > 0.0 }),
+            SliderRow("detail.nrContrast", shown = { it.value("detail.nrLuminance") > 0.0 }),
+        )
         "color" -> tab("detail.nrColor", listOf("detail.nrColorDetail", "detail.nrColorSmoothness"))
         else -> tab("detail.sharpenAmount", listOf("detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"))
     }
-    PanelList(vm, ed, rows)
+    if (ed.detailTab == "noise" && ed.denoiseApplicable) {
+        PanelList(vm, ed, rows, header = {
+            item(key = "ai-denoise") {
+                Column {
+                    SubTitle("AI Denoise")
+                    SwitchRow("AI Denoise", ed.state?.denoiseEnabled == true) { vm.setDenoiseEnabled(it) }
+                    ed.denoiseStatus?.let {
+                        Text(
+                            it,
+                            color = Lc.panelTextDim,
+                            fontFamily = Inter,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                        )
+                    }
+                }
+            }
+        })
+    } else {
+        PanelList(vm, ed, rows)
+    }
 }
 
 /**
