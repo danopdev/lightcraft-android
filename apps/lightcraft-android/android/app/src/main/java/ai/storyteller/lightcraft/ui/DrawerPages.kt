@@ -233,24 +233,34 @@ fun PreferencesPage(vm: AppViewModel, onBack: () -> Unit) {
 private fun DenoisePreferencesPage(vm: AppViewModel, onBack: () -> Unit, onChooseModel: () -> Unit) {
     var modelToRemove by remember { mutableStateOf<Pair<String, String>?>(null) }
     val settings = vm.denoiseModels
-    val modelId = settings?.optString("model")?.takeIf { it.isNotBlank() && it != "null" }.orEmpty()
     val models = settings?.optJSONArray("models")
     val installedModels = (0 until (models?.length() ?: 0)).mapNotNull { index ->
         models?.optJSONObject(index)?.takeIf { it.optBoolean("installed") }
     }
     val modelDirectory = settings?.optString("dir")?.takeIf { it.isNotBlank() && it != "null" } ?: vm.engine?.denoiseModelsDir?.absolutePath
-    val modelName = modelId.takeIf { it.isNotBlank() }?.let { id ->
-        (0 until (models?.length() ?: 0)).firstNotNullOfOrNull { index ->
-            models?.optJSONObject(index)?.takeIf { it.optString("id") == id }?.optString("name")
-        }
-    }
     LaunchedEffect(Unit) { vm.refreshDenoiseModels() }
     DrawerPage("AI Denoise", onBack) {
-        PageGroup {
-            PageRow("Install from files", modelName ?: "Choose model") { onChooseModel() }
+        when {
+            settings == null -> {
+                Text("Checking installed models...", color = pageNote, fontFamily = Inter, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 26.3.dp, vertical = 10.dp))
+            }
+            installedModels.isEmpty() -> {
+                PageGroup {
+                    PageRow("Install from files", "Choose model") { onChooseModel() }
+                }
+            }
+            else -> {
+                Text(
+                    "Remove the installed model before installing another one.",
+                    color = pageNote,
+                    fontFamily = Inter,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 26.3.dp, vertical = 10.dp),
+                )
+            }
         }
         Text(
-            "Download the model files yourself, then select a ZIP containing the .onnx file and denoise-model.json, or select those two files together. LightCraft checks the model, shows its licence, and copies it into private app storage. Model weights are not included.",
+            "Only one AI Denoise model can be installed at a time. Download its files yourself, then select a ZIP containing the .onnx file and denoise-model.json, or select those two files together. LightCraft checks the model, shows its licence, and copies it into private app storage. Model weights are not included.",
             color = pageNote,
             fontFamily = Inter,
             fontSize = 13.sp,

@@ -1436,6 +1436,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun JSONObject.hasInstalledDenoiseModel(): Boolean {
+        val models = optJSONArray("models") ?: return false
+        return (0 until models.length()).any { index ->
+            models.optJSONObject(index)?.optBoolean("installed") == true
+        }
+    }
+
     fun removeDenoiseModel(id: String) {
         val e = engine ?: return
         if (denoiseModelImporting || denoiseModelRemoving != null) return
@@ -1473,6 +1480,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             var staged: File? = null
             try {
+                val installedModels = e.command {
+                    JSONObject(execute("denoise.models.list", "{}"))
+                }
+                if (installedModels.hasInstalledDenoiseModel()) {
+                    throw IOException("Remove the installed AI Denoise model before installing another one.")
+                }
                 val stagedDir = withContext(Dispatchers.IO) {
                     val resolver = getApplication<Application>().contentResolver
                     val named = uris.map { uri -> uri to documentName(resolver, uri) }
@@ -1512,13 +1525,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val model = info.optJSONObject("model") ?: throw IOException("The model description is missing.")
                 if (info.optBoolean("alreadyInstalled")) {
-                    e.command {
-                        execute("denoise.models.select", JSONObject().put("id", model.optString("id")).toString())
-                    }
-                    stagedDir.deleteRecursively()
-                    staged = null
-                    refreshDenoiseModels()
-                    say("AI Denoise model selected")
+                    throw IOException("Remove the installed AI Denoise model before installing another one.")
                 } else {
                     pendingDenoiseImportDir = stagedDir
                     pendingDenoiseModel = model
@@ -1551,6 +1558,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 e.command {
+                    val installedModels = JSONObject(execute("denoise.models.list", "{}"))
+                    if (installedModels.hasInstalledDenoiseModel()) {
+                        throw IOException("Remove the installed AI Denoise model before installing another one.")
+                    }
                     execute(
                         "denoise.models.install",
                         JSONObject().put("path", File(dir, "model.onnx").absolutePath).put("acknowledged", true).toString(),
